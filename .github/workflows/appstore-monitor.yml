@@ -1,0 +1,91 @@
+name: app store monitor
+
+on:
+  schedule:
+    - cron: "5,35 * * * *"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Verificar execução já ativa
+        id: verificar_execucao
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORIO: ${{ github.repository }}
+          WORKFLOW: ${{ github.workflow }}
+          EXECUCAO_ATUAL: ${{ github.run_id }}
+        run: |
+          echo "⏳ Aguardando 10 segundos para identificar execuções simultâneas..."
+          sleep 10
+
+          EXECUCOES_ANTERIORES=$(gh api \
+            "/repos/${REPOSITORIO}/actions/runs?per_page=100" \
+            --jq "[.workflow_runs[]
+              | select(.name == \"${WORKFLOW}\")
+              | select(.id != ${EXECUCAO_ATUAL})
+              | select(.id < ${EXECUCAO_ATUAL})
+              | select(.status == \"queued\" or .status == \"in_progress\")
+            ] | length")
+
+          if [ "$EXECUCOES_ANTERIORES" -gt 0 ]; then
+            echo "⏭️ Já existe uma execução anterior aguardando ou em andamento."
+            echo "⏭️ Esta nova execução será ignorada."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "✅ Nenhuma execução anterior ativa."
+            echo "✅ Esta execução continuará normalmente."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Baixar Core privado
+        if: steps.verificar_execucao.outputs.skip != 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: Lucas25Pedrosa/appstore-telegram-core
+          token: ${{ secrets.APPSTORE_CORE_TOKEN }}
+          path: core
+          fetch-depth: 0
+
+      - name: Instalar Python
+        if: steps.verificar_execucao.outputs.skip != 'true'
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependências
+        if: steps.verificar_execucao.outputs.skip != 'true'
+        working-directory: core
+        run: pip install -r requirements.txt
+
+      - name: Executar monitor
+        if: steps.verificar_execucao.outputs.skip != 'true'
+        working-directory: core
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: python monitor.py
+
+      - name: Salvar estado no Core privado
+        if: steps.verificar_execucao.outputs.skip != 'true'
+        working-directory: core
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add versions.json execution_log.json monthly_logs/ relatorios/
+
+          if git diff --cached --quiet; then
+            echo "Nenhuma alteração nos arquivos monitorados"
+          else
+            git commit -m "Atualizar estado e logs mensais"
+            git pull --rebase origin main
+            git push origin main
+          fi

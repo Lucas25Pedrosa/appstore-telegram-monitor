@@ -1,0 +1,23 @@
+name: Test App Store Monitor Telegram
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Baixar Core privado
+        uses: actions/checkout@v6
+        with:
+          repository: Lucas25Pedrosa/appstore-telegram-core
+          token: ${{ secrets.APPSTORE_CORE_TOKEN }}
+          path: core
+
+      - name: Testar Telegram
+        working-directory: core
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: python3 scripts/test_telegram_bot.py
