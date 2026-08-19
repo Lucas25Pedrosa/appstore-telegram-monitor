@@ -54,6 +54,15 @@ jobs:
           path: core
           fetch-depth: 0
 
+      - name: Baixar configuração compartilhada
+        if: steps.verificar_execucao.outputs.skip != 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: Lucas25Pedrosa/ipa-shared-config-core
+          token: ${{ secrets.SHARED_CONFIG_TOKEN }}
+          path: core/shared-config
+          fetch-depth: 1
+
       - name: Instalar Python
         if: steps.verificar_execucao.outputs.skip != 'true'
         uses: actions/setup-python@v6
