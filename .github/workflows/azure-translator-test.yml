@@ -1,10 +1,10 @@
-name: Test Azure Translator
+name: Test Local Detector + Azure
 
 on:
   workflow_dispatch:
 
 jobs:
-  test-translator:
+  test-language-bridge:
     runs-on: ubuntu-latest
 
     env:
@@ -13,7 +13,12 @@ jobs:
       AZURE_TRANSLATOR_ENDPOINT: ${{ secrets.AZURE_TRANSLATOR_ENDPOINT }}
 
     steps:
-      - name: Testar Azure Translator
+      - name: Instalar detector local
+        run: |
+          python -m pip install --upgrade pip
+          pip install langdetect
+
+      - name: Testar ponte de idioma
         shell: python
         run: |
           import json
@@ -22,6 +27,12 @@ jobs:
           import urllib.error
           import urllib.parse
           import urllib.request
+
+          from langdetect import DetectorFactory, detect_langs
+
+          DetectorFactory.seed = 0
+
+          PT_CONFIDENCE = 0.90
 
           key = os.environ.get("AZURE_TRANSLATOR_KEY", "").strip()
           region = os.environ.get("AZURE_TRANSLATOR_REGION", "").strip()
@@ -39,50 +50,96 @@ jobs:
               print("❌ Secrets ausentes:", ", ".join(missing))
               sys.exit(1)
 
-          text = "This update includes bug fixes and performance improvements."
-          url = endpoint + "/translate?" + urllib.parse.urlencode({
-              "api-version": "3.0",
-              "to": "pt",
-          })
+          def detectar_localmente(texto):
+              try:
+                  resultados = detect_langs(texto)
+              except Exception as exc:
+                  print(f"⚠️ Detector local ficou em dúvida: {exc}")
+                  return None, 0.0
 
-          body = json.dumps([{"Text": text}]).encode("utf-8")
+              if not resultados:
+                  return None, 0.0
 
-          request = urllib.request.Request(
-              url,
-              data=body,
-              method="POST",
-              headers={
-                  "Ocp-Apim-Subscription-Key": key,
-                  "Ocp-Apim-Subscription-Region": region,
-                  "Content-Type": "application/json; charset=UTF-8",
-              },
-          )
+              principal = resultados[0]
+              return principal.lang, float(principal.prob)
 
-          try:
-              with urllib.request.urlopen(request, timeout=30) as response:
-                  payload = json.loads(response.read().decode("utf-8"))
-          except urllib.error.HTTPError as exc:
-              error_body = exc.read().decode("utf-8", errors="replace")
-              print(f"❌ Azure Translator retornou HTTP {exc.code}")
-              print(error_body)
-              sys.exit(1)
-          except Exception as exc:
-              print(f"❌ Falha ao acessar o Azure Translator: {exc}")
-              sys.exit(1)
+          def traduzir_azure(texto):
+              url = endpoint + "/translate?" + urllib.parse.urlencode({
+                  "api-version": "3.0",
+                  "to": "pt",
+              })
 
-          try:
-              detected = payload[0].get("detectedLanguage", {})
-              translated = payload[0]["translations"][0]["text"]
-              language = detected.get("language", "não informado")
-              score = detected.get("score")
+              body = json.dumps([{"Text": texto}]).encode("utf-8")
 
-              print("✅ Azure Translator funcionando.")
-              print(f"🌐 Idioma detectado: {language}")
-              if score is not None:
-                  print(f"🎯 Confiança: {score}")
-              print(f"📝 Original: {text}")
-              print(f"🇧🇷 Tradução: {translated}")
-          except (KeyError, IndexError, TypeError):
-              print("❌ Resposta inesperada do Azure:")
-              print(json.dumps(payload, ensure_ascii=False, indent=2))
-              sys.exit(1)
+              request = urllib.request.Request(
+                  url,
+                  data=body,
+                  method="POST",
+                  headers={
+                      "Ocp-Apim-Subscription-Key": key,
+                      "Ocp-Apim-Subscription-Region": region,
+                      "Content-Type": "application/json; charset=UTF-8",
+                  },
+              )
+
+              try:
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      payload = json.loads(response.read().decode("utf-8"))
+              except urllib.error.HTTPError as exc:
+                  error_body = exc.read().decode("utf-8", errors="replace")
+                  print(f"❌ Azure Translator retornou HTTP {exc.code}")
+                  print(error_body)
+                  return texto
+              except Exception as exc:
+                  print(f"❌ Falha ao acessar Azure Translator: {exc}")
+                  return texto
+
+              try:
+                  return payload[0]["translations"][0]["text"]
+              except (KeyError, IndexError, TypeError):
+                  print("❌ Resposta inesperada do Azure. Mantendo texto original.")
+                  return texto
+
+          def processar_texto(texto):
+              idioma, confianca = detectar_localmente(texto)
+
+              idioma_exibido = idioma or "indefinido"
+              print(f"🔎 Detector local: {idioma_exibido} | confiança: {confianca:.4f}")
+
+              if idioma == "pt" and confianca >= PT_CONFIDENCE:
+                  print("🇧🇷 Português com alta confiança.")
+                  print("⏭️ Azure NÃO utilizado.")
+                  return texto
+
+              print("☁️ Dúvida ou outro idioma: enviando ao Azure Translator.")
+              traduzido = traduzir_azure(texto)
+
+              if traduzido == texto:
+                  print("↩️ Texto original mantido.")
+              else:
+                  print("✅ Tradução recebida do Azure.")
+
+              return traduzido
+
+          testes = [
+              (
+                  "PORTUGUÊS",
+                  "Esta atualização inclui correções de erros e melhorias de desempenho."
+              ),
+              (
+                  "INGLÊS",
+                  "This update includes bug fixes and performance improvements."
+              ),
+          ]
+
+          for titulo, texto in testes:
+              print()
+              print("=" * 70)
+              print(f"🧪 TESTE: {titulo}")
+              print(f"📝 Entrada: {texto}")
+              resultado = processar_texto(texto)
+              print(f"📤 Saída: {resultado}")
+
+          print()
+          print("=" * 70)
+          print("✅ Teste da ponte concluído.")
