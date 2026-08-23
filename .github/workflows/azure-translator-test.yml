@@ -1,0 +1,88 @@
+name: Test Azure Translator
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-translator:
+    runs-on: ubuntu-latest
+
+    env:
+      AZURE_TRANSLATOR_KEY: ${{ secrets.AZURE_TRANSLATOR_KEY }}
+      AZURE_TRANSLATOR_REGION: ${{ secrets.AZURE_TRANSLATOR_REGION }}
+      AZURE_TRANSLATOR_ENDPOINT: ${{ secrets.AZURE_TRANSLATOR_ENDPOINT }}
+
+    steps:
+      - name: Testar Azure Translator
+        shell: python
+        run: |
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          key = os.environ.get("AZURE_TRANSLATOR_KEY", "").strip()
+          region = os.environ.get("AZURE_TRANSLATOR_REGION", "").strip()
+          endpoint = os.environ.get("AZURE_TRANSLATOR_ENDPOINT", "").strip().rstrip("/")
+
+          missing = []
+          if not key:
+              missing.append("AZURE_TRANSLATOR_KEY")
+          if not region:
+              missing.append("AZURE_TRANSLATOR_REGION")
+          if not endpoint:
+              missing.append("AZURE_TRANSLATOR_ENDPOINT")
+
+          if missing:
+              print("❌ Secrets ausentes:", ", ".join(missing))
+              sys.exit(1)
+
+          text = "This update includes bug fixes and performance improvements."
+          url = endpoint + "/translate?" + urllib.parse.urlencode({
+              "api-version": "3.0",
+              "to": "pt",
+          })
+
+          body = json.dumps([{"Text": text}]).encode("utf-8")
+
+          request = urllib.request.Request(
+              url,
+              data=body,
+              method="POST",
+              headers={
+                  "Ocp-Apim-Subscription-Key": key,
+                  "Ocp-Apim-Subscription-Region": region,
+                  "Content-Type": "application/json; charset=UTF-8",
+              },
+          )
+
+          try:
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  payload = json.loads(response.read().decode("utf-8"))
+          except urllib.error.HTTPError as exc:
+              error_body = exc.read().decode("utf-8", errors="replace")
+              print(f"❌ Azure Translator retornou HTTP {exc.code}")
+              print(error_body)
+              sys.exit(1)
+          except Exception as exc:
+              print(f"❌ Falha ao acessar o Azure Translator: {exc}")
+              sys.exit(1)
+
+          try:
+              detected = payload[0].get("detectedLanguage", {})
+              translated = payload[0]["translations"][0]["text"]
+              language = detected.get("language", "não informado")
+              score = detected.get("score")
+
+              print("✅ Azure Translator funcionando.")
+              print(f"🌐 Idioma detectado: {language}")
+              if score is not None:
+                  print(f"🎯 Confiança: {score}")
+              print(f"📝 Original: {text}")
+              print(f"🇧🇷 Tradução: {translated}")
+          except (KeyError, IndexError, TypeError):
+              print("❌ Resposta inesperada do Azure:")
+              print(json.dumps(payload, ensure_ascii=False, indent=2))
+              sys.exit(1)
