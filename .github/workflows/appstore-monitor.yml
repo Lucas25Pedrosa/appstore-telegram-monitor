@@ -66,6 +66,60 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Sincronizar versions.json com apps.json
+        if: steps.verificar_execucao.outputs.skip != 'true'
+        working-directory: core
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          apps_path = Path("shared-config/apps.json")
+          versions_path = Path("versions.json")
+
+          with apps_path.open("r", encoding="utf-8") as f:
+              apps = json.load(f)
+
+          with versions_path.open("r", encoding="utf-8") as f:
+              versions = json.load(f)
+
+          if not isinstance(apps, list):
+              raise TypeError("apps.json precisa ser uma lista.")
+
+          if not isinstance(versions, dict):
+              raise TypeError("versions.json precisa ser um objeto JSON.")
+
+          ids_monitorados = set()
+
+          for app in apps:
+              if not isinstance(app, dict) or "id" not in app:
+                  raise ValueError("Entrada inválida encontrada em apps.json.")
+
+              ids_monitorados.add(str(app["id"]))
+
+          removidos = [
+              app_id
+              for app_id in versions
+              if str(app_id) not in ids_monitorados
+          ]
+
+          if not removidos:
+              print("✅ versions.json já está sincronizado com apps.json.")
+              raise SystemExit(0)
+
+          for app_id in removidos:
+              versions.pop(app_id, None)
+
+          with versions_path.open("w", encoding="utf-8") as f:
+              json.dump(versions, f, ensure_ascii=False, indent=2)
+              f.write("\n")
+
+          print(
+              "🗑️ Removidos de versions.json: "
+              + ", ".join(removidos)
+          )
+          PY
+
       - name: Instalar dependências
         if: steps.verificar_execucao.outputs.skip != 'true'
         working-directory: core
