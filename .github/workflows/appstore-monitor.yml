@@ -6,6 +6,7 @@ on:
 permissions:
   contents: read
   actions: read
+  id-token: write
 
 jobs:
   monitor:
@@ -123,7 +124,9 @@ jobs:
       - name: Instalar dependências
         if: steps.verificar_execucao.outputs.skip != 'true'
         working-directory: core
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          pip install langdetect
 
       - name: Executar monitor
         if: steps.verificar_execucao.outputs.skip != 'true'
@@ -131,7 +134,176 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
+          AZURE_TRANSLATOR_KEY: ${{ secrets.AZURE_TRANSLATOR_KEY }}
+          AZURE_TRANSLATOR_REGION: ${{ secrets.AZURE_TRANSLATOR_REGION }}
+          AZURE_TRANSLATOR_ENDPOINT: ${{ secrets.AZURE_TRANSLATOR_ENDPOINT }}
         run: python monitor.py
+
+      - name: Login no Azure para consultar métricas
+        id: azure_login
+        if: steps.verificar_execucao.outputs.skip != 'true'
+        continue-on-error: true
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Monitorar consumo do Azure Translator
+        if: steps.verificar_execucao.outputs.skip != 'true' && steps.azure_login.outcome == 'success'
+        continue-on-error: true
+        working-directory: core
+        env:
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: |
+          set -euo pipefail
+
+          RESOURCE_ID="/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/IPA-Monitor-Translation/providers/Microsoft.CognitiveServices/accounts/ipa-monitor-translation"
+          START_TIME="$(date -u +%Y-%m-01T00:00:00Z)"
+          END_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          az monitor metrics list \
+            --resource "$RESOURCE_ID" \
+            --metrics "TextCharactersTranslated" \
+            --aggregation "Total" \
+            --interval "P1D" \
+            --start-time "$START_TIME" \
+            --end-time "$END_TIME" \
+            --output json > azure-translator-metrics.json
+
+          python - <<'PY'
+          import json
+          import os
+          import urllib.parse
+          import urllib.request
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          LIMIT = 2_000_000
+          THRESHOLDS = (25, 50, 75, 100)
+          STATE_PATH = Path("azure_translation_usage.json")
+          METRICS_PATH = Path("azure-translator-metrics.json")
+
+          telegram_token = os.environ.get("TELEGRAM_TOKEN", "").strip()
+          chat_id = os.environ.get("CHAT_ID", "").strip()
+
+          with METRICS_PATH.open("r", encoding="utf-8") as f:
+              metrics = json.load(f)
+
+          total = 0
+          for metric in metrics.get("value", []):
+              for timeseries in metric.get("timeseries", []):
+                  for item in timeseries.get("data", []):
+                      value = item.get("total")
+                      if value is not None:
+                          total += int(round(float(value)))
+
+          now = datetime.now(timezone.utc)
+          month = now.strftime("%Y-%m")
+
+          state = {
+              "month": month,
+              "characters_used": 0,
+              "alerts_sent": [],
+          }
+
+          if STATE_PATH.exists():
+              try:
+                  with STATE_PATH.open("r", encoding="utf-8") as f:
+                      loaded = json.load(f)
+                  if isinstance(loaded, dict) and loaded.get("month") == month:
+                      state = loaded
+              except (OSError, json.JSONDecodeError):
+                  pass
+
+          sent = {
+              int(value)
+              for value in state.get("alerts_sent", [])
+              if str(value).isdigit()
+          }
+
+          current_percent = (total / LIMIT) * 100 if LIMIT else 0
+
+          icons = {
+              25: "🟢",
+              50: "🟡",
+              75: "🟠",
+              100: "🔴",
+          }
+
+          def format_number(value):
+              return f"{value:,}".replace(",", ".")
+
+          def send_telegram(threshold):
+              if not telegram_token or not chat_id:
+                  print(
+                      f"⚠️ Marco de {threshold}% atingido, mas Telegram não está configurado."
+                  )
+                  return False
+
+              remaining = max(LIMIT - total, 0)
+              message = (
+                  "🌐 <b>Azure Translator</b>\n\n"
+                  f"{icons[threshold]} Uso mensal atingiu <b>{threshold}%</b>\n\n"
+                  f"🔤 <b>{format_number(total)} / {format_number(LIMIT)}</b> caracteres\n"
+                  f"📊 Restantes: <b>{format_number(remaining)}</b> caracteres"
+              )
+
+              payload = urllib.parse.urlencode({
+                  "chat_id": chat_id,
+                  "text": message,
+                  "parse_mode": "HTML",
+                  "disable_web_page_preview": "true",
+              }).encode("utf-8")
+
+              request = urllib.request.Request(
+                  f"https://api.telegram.org/bot{telegram_token}/sendMessage",
+                  data=payload,
+                  method="POST",
+              )
+
+              try:
+                  with urllib.request.urlopen(request, timeout=20) as response:
+                      result = json.loads(response.read().decode("utf-8"))
+                  if result.get("ok"):
+                      return True
+                  print(f"⚠️ Telegram recusou alerta de {threshold}%.")
+              except Exception as exc:
+                  print(f"⚠️ Falha ao enviar alerta de {threshold}%: {exc}")
+
+              return False
+
+          for threshold in THRESHOLDS:
+              if current_percent >= threshold and threshold not in sent:
+                  if send_telegram(threshold):
+                      sent.add(threshold)
+                      print(f"📨 Alerta de {threshold}% enviado ao Telegram.")
+
+          state = {
+              "month": month,
+              "characters_used": total,
+              "alerts_sent": sorted(sent),
+          }
+
+          with STATE_PATH.open("w", encoding="utf-8") as f:
+              json.dump(state, f, ensure_ascii=False, indent=2)
+              f.write("\n")
+
+          print(
+              "🌐 Azure Translator: "
+              f"{format_number(total)} / {format_number(LIMIT)} caracteres "
+              f"({current_percent:.4f}%)."
+          )
+          PY
+
+          rm -f azure-translator-metrics.json
+
+      - name: Logout do Azure
+        if: always() && steps.azure_login.outcome == 'success'
+        continue-on-error: true
+        run: az logout
 
       - name: Salvar estado no Core privado
         if: steps.verificar_execucao.outputs.skip != 'true'
@@ -141,6 +313,10 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add versions.json execution_log.json monthly_logs/ relatorios/
+
+          if [ -f azure_translation_usage.json ]; then
+            git add azure_translation_usage.json
+          fi
 
           if git diff --cached --quiet; then
             echo "Nenhuma alteração nos arquivos monitorados"
