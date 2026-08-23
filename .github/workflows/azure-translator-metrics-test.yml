@@ -1,0 +1,67 @@
+name: Test Azure Translator Metrics
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  test-metrics:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Login no Azure via OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Consultar consumo oficial do Translator
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RESOURCE_ID="/subscriptions/${{ secrets.AZURE_SUBSCRIPTION_ID }}/resourceGroups/IPA-Monitor-Translation/providers/Microsoft.CognitiveServices/accounts/ipa-monitor-translation"
+          START_TIME="$(date -u +%Y-%m-01T00:00:00Z)"
+          END_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          echo "🔐 Login OIDC concluído."
+          echo "📅 Período: ${START_TIME} até ${END_TIME}"
+          echo "📊 Métrica: TextCharactersTranslated"
+
+          az monitor metrics list \
+            --resource "$RESOURCE_ID" \
+            --metrics "TextCharactersTranslated" \
+            --aggregation "Total" \
+            --interval "P1D" \
+            --start-time "$START_TIME" \
+            --end-time "$END_TIME" \
+            --output json > metrics.json
+
+          TOTAL="$(
+            jq '[.value[]?.timeseries[]?.data[]?.total // 0] | add // 0' metrics.json
+          )"
+
+          echo
+          echo "============================================================"
+          echo "✅ Consulta ao Azure Monitor funcionando."
+          echo "🔤 Caracteres traduzidos no mês: ${TOTAL}"
+          echo "📦 Limite do Translator F0: 2000000"
+
+          PERCENT="$(
+            python - <<PY
+          total = float("${TOTAL}")
+          limit = 2_000_000
+          print(f"{(total / limit) * 100:.4f}")
+          PY
+          )"
+
+          echo "📈 Uso do F0: ${PERCENT}%"
+          echo "============================================================"
+
+      - name: Logout do Azure
+        if: always()
+        run: az logout
