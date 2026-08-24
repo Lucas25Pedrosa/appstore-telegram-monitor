@@ -12,8 +12,9 @@ on:
           - bootstrap
           - app
           - preview
+          - telegram-test
       app_id:
-        description: "App Store ID (obrigatório nos modos app e preview)"
+        description: "App Store ID (obrigatório nos modos app, preview e telegram-test)"
         required: false
         type: string
       app_name:
@@ -64,7 +65,7 @@ jobs:
           APP_ID: ${{ inputs.app_id }}
         run: |
           set -euo pipefail
-          if { [ "$MODE" = "app" ] || [ "$MODE" = "preview" ]; } && [ -z "$APP_ID" ]; then
+          if { [ "$MODE" = "app" ] || [ "$MODE" = "preview" ] || [ "$MODE" = "telegram-test" ]; } && [ -z "$APP_ID" ]; then
             echo "❌ app_id é obrigatório quando mode=$MODE"
             exit 1
           fi
@@ -90,6 +91,31 @@ jobs:
             python core/scripts/emoji_manager.py "${ARGS[@]}"
           fi
 
+      - name: Criar primeiro custom emoji no Telegram
+        if: ${{ inputs.mode == 'telegram-test' }}
+        env:
+          EMOJI_MANAGER_BOT_TOKEN: ${{ secrets.EMOJI_MANAGER_BOT_TOKEN }}
+          EMOJI_MANAGER_OWNER_ID: ${{ secrets.EMOJI_MANAGER_OWNER_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p emoji-telegram-result
+          python core/scripts/telegram_emoji_manager.py \
+            --image "${{ steps.backup.outputs.preview_file }}" \
+            --app-id "${{ inputs.app_id }}" \
+            --app-name "${{ inputs.app_name }}" \
+            --result "emoji-telegram-result/result.json"
+
+      - name: Publicar resultado do teste Telegram
+        if: ${{ inputs.mode == 'telegram-test' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: emoji-telegram-test-${{ inputs.app_id }}
+          path: |
+            emoji-preview/*.png
+            emoji-telegram-result/result.json
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Publicar preview 100x100
         if: ${{ inputs.mode == 'preview' }}
         uses: actions/upload-artifact@v4
@@ -100,7 +126,7 @@ jobs:
           retention-days: 1
 
       - name: Salvar backup no ipa-shared-config-core
-        if: ${{ inputs.mode != 'preview' }}
+        if: ${{ inputs.mode != 'preview' && inputs.mode != 'telegram-test' }}
         working-directory: shared-config
         run: |
           set -euo pipefail
