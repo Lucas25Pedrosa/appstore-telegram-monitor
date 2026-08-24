@@ -13,6 +13,7 @@ on:
           - app
           - preview
           - telegram-test
+          - bulk-telegram
       app_id:
         description: "App Store ID (obrigatório nos modos app, preview e telegram-test)"
         required: false
@@ -37,7 +38,7 @@ concurrency:
 jobs:
   backup-icons:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
 
     steps:
       - name: Baixar Core privado
@@ -76,6 +77,7 @@ jobs:
           fi
 
       - name: Arquivar ícones originais
+        if: ${{ inputs.mode != 'bulk-telegram' }}
         id: backup
         env:
           SHARED_CONFIG_DIR: ${{ github.workspace }}/shared-config
@@ -117,6 +119,53 @@ jobs:
 
           python core/scripts/telegram_emoji_manager.py "${ARGS[@]}"
 
+      - name: Migrar pack oficial em lote
+        if: ${{ inputs.mode == 'bulk-telegram' }}
+        env:
+          SHARED_CONFIG_DIR: ${{ github.workspace }}/shared-config
+          EMOJI_PREVIEW_DIR: ${{ github.workspace }}/emoji-preview
+          EMOJI_MANAGER_BOT_TOKEN: ${{ secrets.EMOJI_MANAGER_BOT_TOKEN }}
+          EMOJI_MANAGER_OWNER_ID: ${{ secrets.EMOJI_MANAGER_OWNER_ID }}
+        run: |
+          set -euo pipefail
+          python core/scripts/telegram_emoji_bulk.py --seed-app-id 389801252
+
+      - name: Preservar estado da migração no shared-config
+        if: ${{ always() && inputs.mode == 'bulk-telegram' }}
+        working-directory: shared-config
+        run: |
+          set -euo pipefail
+
+          if [ ! -d .emoji-manager ]; then
+            echo "ℹ️ Nenhum estado de migração foi gerado."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .emoji-manager/
+
+          if git diff --cached --quiet; then
+            echo "✅ Estado da migração já está atualizado."
+            exit 0
+          fi
+
+          git commit -m "Save Emoji Manager bulk migration state"
+          git pull --rebase origin main
+          git push origin main
+          echo "💾 Estado da migração preservado para retomada."
+
+      - name: Publicar resultado da migração em lote
+        if: ${{ always() && inputs.mode == 'bulk-telegram' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: emoji-bulk-migration
+          path: |
+            shared-config/.emoji-manager/*.json
+            emoji-preview/*.png
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Publicar resultado do teste Telegram
         if: ${{ inputs.mode == 'telegram-test' }}
         uses: actions/upload-artifact@v4
@@ -138,7 +187,7 @@ jobs:
           retention-days: 1
 
       - name: Salvar backup no ipa-shared-config-core
-        if: ${{ inputs.mode != 'preview' && inputs.mode != 'telegram-test' }}
+        if: ${{ inputs.mode != 'preview' && inputs.mode != 'telegram-test' && inputs.mode != 'bulk-telegram' }}
         working-directory: shared-config
         run: |
           set -euo pipefail
