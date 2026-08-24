@@ -16,6 +16,7 @@ on:
           - bulk-telegram
           - version-check-test
           - version-change-dry-run
+          - add-app
       app_id:
         description: "App Store ID"
         required: false
@@ -25,7 +26,11 @@ on:
         required: false
         type: string
       bundle_id:
-        description: "Bundle ID (obrigatório no version-check-test)"
+        description: "Bundle ID (obrigatório no version-check-test e add-app)"
+        required: false
+        type: string
+      request_id:
+        description: "ID único da solicitação automática do /add"
         required: false
         type: string
       replace_existing:
@@ -77,28 +82,34 @@ jobs:
           APP_ID: ${{ inputs.app_id }}
           APP_NAME: ${{ inputs.app_name }}
           BUNDLE_ID: ${{ inputs.bundle_id }}
+          REQUEST_ID: ${{ inputs.request_id }}
         run: |
           set -euo pipefail
 
-          if { [ "$MODE" = "app" ] || [ "$MODE" = "preview" ] || [ "$MODE" = "telegram-test" ] || [ "$MODE" = "version-check-test" ] || [ "$MODE" = "version-change-dry-run" ]; } && [ -z "$APP_ID" ]; then
+          if { [ "$MODE" = "app" ] || [ "$MODE" = "preview" ] || [ "$MODE" = "telegram-test" ] || [ "$MODE" = "version-check-test" ] || [ "$MODE" = "version-change-dry-run" ] || [ "$MODE" = "add-app" ]; } && [ -z "$APP_ID" ]; then
             echo "❌ app_id é obrigatório quando mode=$MODE"
             exit 1
           fi
 
-          if [ "$MODE" = "version-check-test" ] || [ "$MODE" = "version-change-dry-run" ]; then
+          if [ "$MODE" = "version-check-test" ] || [ "$MODE" = "version-change-dry-run" ] || [ "$MODE" = "add-app" ]; then
             if [ -z "$APP_NAME" ]; then
-              echo "❌ app_name é obrigatório quando mode=version-check-test"
+              echo "❌ app_name é obrigatório quando mode=$MODE"
               exit 1
             fi
 
             if [ -z "$BUNDLE_ID" ]; then
-              echo "❌ bundle_id é obrigatório quando mode=version-check-test"
+              echo "❌ bundle_id é obrigatório quando mode=$MODE"
               exit 1
             fi
           fi
 
+          if [ "$MODE" = "add-app" ] && [ -z "$REQUEST_ID" ]; then
+            echo "❌ request_id é obrigatório quando mode=add-app"
+            exit 1
+          fi
+
       - name: Arquivar ícones originais
-        if: ${{ inputs.mode != 'bulk-telegram' && inputs.mode != 'version-check-test' && inputs.mode != 'version-change-dry-run' }}
+        if: ${{ inputs.mode != 'bulk-telegram' && inputs.mode != 'version-check-test' && inputs.mode != 'version-change-dry-run' && inputs.mode != 'add-app' }}
         id: backup
         env:
           SHARED_CONFIG_DIR: ${{ github.workspace }}/shared-config
@@ -194,6 +205,95 @@ jobs:
             emoji-version-test/result.json
             emoji-preview/*.png
             shared-config/.emoji-manager/pending/*.json
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 1
+
+      - name: Preparar emoji automático do /add
+        if: ${{ inputs.mode == 'add-app' }}
+        env:
+          SHARED_CONFIG_DIR: ${{ github.workspace }}/shared-config
+          EMOJI_PREVIEW_DIR: ${{ github.workspace }}/emoji-preview
+          EMOJI_MANAGER_BOT_TOKEN: ${{ secrets.EMOJI_MANAGER_BOT_TOKEN }}
+          EMOJI_MANAGER_OWNER_ID: ${{ secrets.EMOJI_MANAGER_OWNER_ID }}
+        run: |
+          set -euo pipefail
+
+          python core/scripts/emoji_add_app.py prepare \
+            --app-id "${{ inputs.app_id }}" \
+            --app-name "${{ inputs.app_name }}" \
+            --bundle-id "${{ inputs.bundle_id }}" \
+            --request-id "${{ inputs.request_id }}"
+
+      - name: Persistir pending do /add antes da mutação
+        if: ${{ always() && inputs.mode == 'add-app' }}
+        working-directory: shared-config
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add app-icons/ .emoji-manager/ custom_emojis.json
+
+          if git diff --cached --quiet; then
+            echo "✅ Nenhum estado novo do /add para persistir antes da mutação."
+            exit 0
+          fi
+
+          git commit -m "Prepare automatic app emoji"
+          git pull --rebase origin main
+          git push origin main
+
+          echo "💾 Pending do emoji automático persistido antes da mutação."
+
+      - name: Criar emoji automático do /add
+        if: ${{ success() && inputs.mode == 'add-app' }}
+        env:
+          SHARED_CONFIG_DIR: ${{ github.workspace }}/shared-config
+          EMOJI_PREVIEW_DIR: ${{ github.workspace }}/emoji-preview
+          EMOJI_MANAGER_BOT_TOKEN: ${{ secrets.EMOJI_MANAGER_BOT_TOKEN }}
+          EMOJI_MANAGER_OWNER_ID: ${{ secrets.EMOJI_MANAGER_OWNER_ID }}
+        run: |
+          set -euo pipefail
+
+          python core/scripts/emoji_add_app.py apply \
+            --app-id "${{ inputs.app_id }}" \
+            --app-name "${{ inputs.app_name }}" \
+            --bundle-id "${{ inputs.bundle_id }}" \
+            --request-id "${{ inputs.request_id }}"
+
+      - name: Persistir resultado do emoji automático
+        if: ${{ always() && inputs.mode == 'add-app' }}
+        working-directory: shared-config
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add custom_emojis.json app-icons/ .emoji-manager/
+
+          if git diff --cached --quiet; then
+            echo "✅ Nenhum resultado novo do emoji automático para salvar."
+            exit 0
+          fi
+
+          git commit -m "Complete automatic app emoji"
+          git pull --rebase origin main
+          git push origin main
+
+          echo "✅ Resultado do emoji automático salvo no shared-config."
+
+      - name: Publicar diagnóstico do emoji automático
+        if: ${{ always() && inputs.mode == 'add-app' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: emoji-add-${{ inputs.request_id }}
+          path: |
+            shared-config/.emoji-manager/add-results/${{ inputs.request_id }}.json
+            shared-config/.emoji-manager/pending-add/*.json
+            emoji-preview/*.png
           if-no-files-found: warn
           include-hidden-files: true
           retention-days: 1
@@ -413,7 +513,7 @@ jobs:
           retention-days: 1
 
       - name: Salvar backup no ipa-shared-config-core
-        if: ${{ inputs.mode != 'preview' && inputs.mode != 'telegram-test' && inputs.mode != 'bulk-telegram' && inputs.mode != 'version-check-test' && inputs.mode != 'version-change-dry-run' }}
+        if: ${{ inputs.mode != 'preview' && inputs.mode != 'telegram-test' && inputs.mode != 'bulk-telegram' && inputs.mode != 'version-check-test' && inputs.mode != 'version-change-dry-run' && inputs.mode != 'add-app' }}
         working-directory: shared-config
         run: |
           set -euo pipefail
