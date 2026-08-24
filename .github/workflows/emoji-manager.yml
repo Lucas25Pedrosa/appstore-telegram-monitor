@@ -155,6 +155,152 @@ jobs:
           git push origin main
           echo "💾 Estado da migração preservado para retomada."
 
+      - name: Promover custom_emojis para produção
+        if: ${{ success() && inputs.mode == 'bulk-telegram' }}
+        working-directory: shared-config
+        env:
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Garante que a validação use o estado mais recente do repositório.
+          git pull --rebase origin main
+
+          python - <<'PY'
+          import json
+          import os
+          import shutil
+          from pathlib import Path
+
+          root = Path(".")
+          apps_path = root / "apps.json"
+          active_path = root / "custom_emojis.json"
+          state_path = root / ".emoji-manager" / "bulk_state.json"
+          next_path = root / ".emoji-manager" / "custom_emojis.next.json"
+
+          for path in (apps_path, active_path, state_path, next_path):
+              if not path.is_file():
+                  raise SystemExit(f"❌ Arquivo obrigatório ausente: {path}")
+
+          apps = json.loads(apps_path.read_text(encoding="utf-8"))
+          active = json.loads(active_path.read_text(encoding="utf-8"))
+          state = json.loads(state_path.read_text(encoding="utf-8"))
+          proposed = json.loads(next_path.read_text(encoding="utf-8"))
+
+          if not isinstance(apps, list):
+              raise SystemExit("❌ apps.json precisa conter uma lista.")
+          if not isinstance(active, dict):
+              raise SystemExit("❌ custom_emojis.json ativo é inválido.")
+          if not isinstance(proposed, dict):
+              raise SystemExit("❌ custom_emojis.next.json é inválido.")
+          if not isinstance(state, dict):
+              raise SystemExit("❌ bulk_state.json é inválido.")
+
+          if state.get("complete") is not True:
+              raise SystemExit("❌ Migração não está marcada como complete=true.")
+
+          state_apps = state.get("apps")
+          if not isinstance(state_apps, dict):
+              raise SystemExit("❌ bulk_state.json não contém apps válidos.")
+
+          expected_ids = set()
+          for item in apps:
+              if not isinstance(item, dict):
+                  continue
+              try:
+                  expected_ids.add(str(int(item.get("id"))))
+              except (TypeError, ValueError):
+                  continue
+
+          if not expected_ids:
+              raise SystemExit("❌ Nenhum App Store ID válido em apps.json.")
+
+          state_ids = set(state_apps.keys())
+          if state_ids != expected_ids:
+              missing = sorted(expected_ids - state_ids)
+              extra = sorted(state_ids - expected_ids)
+              raise SystemExit(
+                  "❌ Estado em lote não corresponde ao apps.json. "
+                  f"Ausentes={missing} Extras={extra}"
+              )
+
+          for app_id, item in state_apps.items():
+              if not isinstance(item, dict):
+                  raise SystemExit(f"❌ Estado inválido para App Store ID {app_id}.")
+              if item.get("status") != "done":
+                  raise SystemExit(
+                      f"❌ App Store ID {app_id} não está concluído: "
+                      f"{item.get('status')!r}"
+                  )
+
+              bundle_id = str(item.get("bundle_id") or "").strip()
+              emoji_id = str(item.get("custom_emoji_id") or "").strip()
+              if not bundle_id or not emoji_id:
+                  raise SystemExit(
+                      f"❌ Bundle ID/custom_emoji_id ausente para App Store ID {app_id}."
+                  )
+
+              entry = proposed.get(bundle_id)
+              if not isinstance(entry, dict):
+                  raise SystemExit(
+                      f"❌ {bundle_id} não existe no custom_emojis.next.json."
+                  )
+
+              proposed_id = str(entry.get("custom_emoji_id") or "").strip()
+              if proposed_id != emoji_id:
+                  raise SystemExit(
+                      f"❌ ID divergente para {bundle_id}: "
+                      f"estado={emoji_id} next={proposed_id}"
+                  )
+
+          # Toda entrada explicitamente protegida precisa sobreviver idêntica.
+          for key, value in active.items():
+              if isinstance(value, dict) and value.get("managed") is False:
+                  if proposed.get(key) != value:
+                      raise SystemExit(
+                          f"❌ Entrada protegida foi alterada no next JSON: {key}"
+                      )
+
+          active_bytes = active_path.read_bytes()
+          next_bytes = next_path.read_bytes()
+
+          if active_bytes == next_bytes:
+              print("✅ custom_emojis.json já está promovido; nenhuma troca necessária.")
+          else:
+              backup_dir = root / ".emoji-manager" / "backups"
+              backup_dir.mkdir(parents=True, exist_ok=True)
+
+              run_id = str(os.environ.get("RUN_ID") or "manual").strip()
+              backup_path = backup_dir / f"custom_emojis.pre-bulk-{run_id}.json"
+
+              if not backup_path.exists():
+                  shutil.copy2(active_path, backup_path)
+                  print(f"💾 Backup criado: {backup_path}")
+              else:
+                  print(f"ℹ️ Backup desta execução já existe: {backup_path}")
+
+              active_path.write_bytes(next_bytes)
+              print(
+                  "✅ custom_emojis.next.json promovido para custom_emojis.json "
+                  f"({len(state_apps)} apps validados)."
+              )
+          PY
+
+          git add custom_emojis.json .emoji-manager/
+
+          if git diff --cached --quiet; then
+            echo "✅ Produção já estava sincronizada; nenhum commit necessário."
+            exit 0
+          fi
+
+          git commit -m "Promote Emoji Manager custom emoji IDs"
+          git pull --rebase origin main
+          git push origin main
+          echo "🚀 custom_emojis.json promovido com sucesso."
+
       - name: Publicar resultado da migração em lote
         if: ${{ always() && inputs.mode == 'bulk-telegram' }}
         uses: actions/upload-artifact@v4
