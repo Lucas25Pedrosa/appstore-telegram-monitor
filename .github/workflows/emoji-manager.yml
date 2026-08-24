@@ -1,0 +1,109 @@
+name: Emoji Manager
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Modo de execução"
+        required: true
+        default: bootstrap
+        type: choice
+        options:
+          - bootstrap
+          - app
+      app_id:
+        description: "App Store ID (obrigatório no modo app)"
+        required: false
+        type: string
+      app_name:
+        description: "Nome do app (opcional; usado para a pasta)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: emoji-manager-shared-config
+  cancel-in-progress: false
+
+jobs:
+  backup-icons:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Baixar Core privado
+        uses: actions/checkout@v6
+        with:
+          repository: Lucas25Pedrosa/appstore-telegram-core
+          token: ${{ secrets.APPSTORE_CORE_TOKEN }}
+          path: core
+          fetch-depth: 1
+
+      - name: Baixar configuração compartilhada
+        uses: actions/checkout@v6
+        with:
+          repository: Lucas25Pedrosa/ipa-shared-config-core
+          token: ${{ secrets.SHARED_CONFIG_TOKEN }}
+          path: shared-config
+          fetch-depth: 0
+
+      - name: Instalar Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependências
+        run: python -m pip install --disable-pip-version-check requests
+
+      - name: Validar entrada
+        env:
+          MODE: ${{ inputs.mode }}
+          APP_ID: ${{ inputs.app_id }}
+        run: |
+          set -euo pipefail
+          if [ "$MODE" = "app" ] && [ -z "$APP_ID" ]; then
+            echo "❌ app_id é obrigatório quando mode=app"
+            exit 1
+          fi
+
+      - name: Arquivar ícones originais
+        id: backup
+        env:
+          SHARED_CONFIG_DIR: ${{ github.workspace }}/shared-config
+          MODE: ${{ inputs.mode }}
+          APP_ID: ${{ inputs.app_id }}
+          APP_NAME: ${{ inputs.app_name }}
+        run: |
+          set -euo pipefail
+
+          if [ "$MODE" = "bootstrap" ]; then
+            python core/scripts/emoji_manager.py bootstrap
+          else
+            ARGS=(app --app-id "$APP_ID")
+            if [ -n "$APP_NAME" ]; then
+              ARGS+=(--app-name "$APP_NAME")
+            fi
+            python core/scripts/emoji_manager.py "${ARGS[@]}"
+          fi
+
+      - name: Salvar backup no ipa-shared-config-core
+        working-directory: shared-config
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add app-icons/
+
+          if git diff --cached --quiet; then
+            echo "✅ Nenhum ícone novo para salvar."
+            exit 0
+          fi
+
+          git commit -m "Backup App Store icons"
+          git pull --rebase origin main
+          git push origin main
+          echo "✅ Backup dos ícones salvo no ipa-shared-config-core."
