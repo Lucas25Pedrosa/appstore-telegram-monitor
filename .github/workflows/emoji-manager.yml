@@ -11,8 +11,9 @@ on:
         options:
           - bootstrap
           - app
+          - preview
       app_id:
-        description: "App Store ID (obrigatório no modo app)"
+        description: "App Store ID (obrigatório nos modos app e preview)"
         required: false
         type: string
       app_name:
@@ -55,7 +56,7 @@ jobs:
           python-version: "3.12"
 
       - name: Instalar dependências
-        run: python -m pip install --disable-pip-version-check requests
+        run: python -m pip install --disable-pip-version-check requests pillow
 
       - name: Validar entrada
         env:
@@ -63,8 +64,8 @@ jobs:
           APP_ID: ${{ inputs.app_id }}
         run: |
           set -euo pipefail
-          if [ "$MODE" = "app" ] && [ -z "$APP_ID" ]; then
-            echo "❌ app_id é obrigatório quando mode=app"
+          if { [ "$MODE" = "app" ] || [ "$MODE" = "preview" ]; } && [ -z "$APP_ID" ]; then
+            echo "❌ app_id é obrigatório quando mode=$MODE"
             exit 1
           fi
 
@@ -75,20 +76,31 @@ jobs:
           MODE: ${{ inputs.mode }}
           APP_ID: ${{ inputs.app_id }}
           APP_NAME: ${{ inputs.app_name }}
+          EMOJI_PREVIEW_DIR: ${{ github.workspace }}/emoji-preview
         run: |
           set -euo pipefail
 
           if [ "$MODE" = "bootstrap" ]; then
             python core/scripts/emoji_manager.py bootstrap
           else
-            ARGS=(app --app-id "$APP_ID")
+            ARGS=("$MODE" --app-id "$APP_ID")
             if [ -n "$APP_NAME" ]; then
               ARGS+=(--app-name "$APP_NAME")
             fi
             python core/scripts/emoji_manager.py "${ARGS[@]}"
           fi
 
+      - name: Publicar preview 100x100
+        if: ${{ inputs.mode == 'preview' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: emoji-preview-${{ inputs.app_id }}
+          path: emoji-preview/*.png
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Salvar backup no ipa-shared-config-core
+        if: ${{ inputs.mode != 'preview' }}
         working-directory: shared-config
         run: |
           set -euo pipefail
