@@ -199,7 +199,7 @@ jobs:
 
       - name: Publicar resultado do teste de versão
         if: ${{ always() && (inputs.mode == 'version-check-test' || inputs.mode == 'version-change-dry-run') }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: emoji-version-check-${{ inputs.app_id }}
           path: |
@@ -288,7 +288,7 @@ jobs:
 
       - name: Publicar diagnóstico do emoji automático
         if: ${{ always() && inputs.mode == 'add-app' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: emoji-add-${{ inputs.request_id }}
           path: |
@@ -373,7 +373,7 @@ jobs:
 
       - name: Publicar diagnóstico da remoção automática
         if: ${{ always() && inputs.mode == 'delete-app' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: emoji-del-${{ inputs.request_id }}
           path: |
@@ -567,7 +567,7 @@ jobs:
 
       - name: Publicar resultado da migração em lote
         if: ${{ always() && inputs.mode == 'bulk-telegram' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: emoji-bulk-migration
           path: |
@@ -579,7 +579,7 @@ jobs:
 
       - name: Publicar resultado do teste Telegram
         if: ${{ inputs.mode == 'telegram-test' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: emoji-telegram-test-${{ inputs.app_id }}
           path: |
@@ -590,7 +590,7 @@ jobs:
 
       - name: Publicar preview 100x100
         if: ${{ inputs.mode == 'preview' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: emoji-preview-${{ inputs.app_id }}
           path: emoji-preview/*.png
