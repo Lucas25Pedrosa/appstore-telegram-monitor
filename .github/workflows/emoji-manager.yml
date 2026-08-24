@@ -14,12 +14,17 @@ on:
           - preview
           - telegram-test
           - bulk-telegram
+          - version-check-test
       app_id:
-        description: "App Store ID (obrigatório nos modos app, preview e telegram-test)"
+        description: "App Store ID"
         required: false
         type: string
       app_name:
-        description: "Nome do app (opcional; usado para a pasta)"
+        description: "Nome do app"
+        required: false
+        type: string
+      bundle_id:
+        description: "Bundle ID (obrigatório no version-check-test)"
         required: false
         type: string
       replace_existing:
@@ -69,15 +74,30 @@ jobs:
         env:
           MODE: ${{ inputs.mode }}
           APP_ID: ${{ inputs.app_id }}
+          APP_NAME: ${{ inputs.app_name }}
+          BUNDLE_ID: ${{ inputs.bundle_id }}
         run: |
           set -euo pipefail
-          if { [ "$MODE" = "app" ] || [ "$MODE" = "preview" ] || [ "$MODE" = "telegram-test" ]; } && [ -z "$APP_ID" ]; then
+
+          if { [ "$MODE" = "app" ] || [ "$MODE" = "preview" ] || [ "$MODE" = "telegram-test" ] || [ "$MODE" = "version-check-test" ]; } && [ -z "$APP_ID" ]; then
             echo "❌ app_id é obrigatório quando mode=$MODE"
             exit 1
           fi
 
+          if [ "$MODE" = "version-check-test" ]; then
+            if [ -z "$APP_NAME" ]; then
+              echo "❌ app_name é obrigatório quando mode=version-check-test"
+              exit 1
+            fi
+
+            if [ -z "$BUNDLE_ID" ]; then
+              echo "❌ bundle_id é obrigatório quando mode=version-check-test"
+              exit 1
+            fi
+          fi
+
       - name: Arquivar ícones originais
-        if: ${{ inputs.mode != 'bulk-telegram' }}
+        if: ${{ inputs.mode != 'bulk-telegram' && inputs.mode != 'version-check-test' }}
         id: backup
         env:
           SHARED_CONFIG_DIR: ${{ github.workspace }}/shared-config
@@ -118,6 +138,57 @@ jobs:
           fi
 
           python core/scripts/telegram_emoji_manager.py "${ARGS[@]}"
+
+      - name: Testar sincronização de ícone por versão
+        if: ${{ inputs.mode == 'version-check-test' }}
+        env:
+          SHARED_CONFIG_DIR: ${{ github.workspace }}/shared-config
+          EMOJI_PREVIEW_DIR: ${{ github.workspace }}/emoji-preview
+          EMOJI_MANAGER_BOT_TOKEN: ${{ secrets.EMOJI_MANAGER_BOT_TOKEN }}
+          EMOJI_MANAGER_OWNER_ID: ${{ secrets.EMOJI_MANAGER_OWNER_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p emoji-version-test
+
+          python core/scripts/emoji_version_update.py \
+            --app-id "${{ inputs.app_id }}" \
+            --app-name "${{ inputs.app_name }}" \
+            --bundle-id "${{ inputs.bundle_id }}" \
+            --result "emoji-version-test/result.json"
+
+      - name: Preservar estado do teste de versão
+        if: ${{ always() && inputs.mode == 'version-check-test' }}
+        working-directory: shared-config
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add custom_emojis.json app-icons/ .emoji-manager/
+
+          if git diff --cached --quiet; then
+            echo "✅ Nenhuma alteração do teste de versão para salvar."
+            exit 0
+          fi
+
+          git commit -m "Validate Emoji Manager version icon state"
+          git pull --rebase origin main
+          git push origin main
+          echo "✅ Estado do teste de versão salvo."
+
+      - name: Publicar resultado do teste de versão
+        if: ${{ always() && inputs.mode == 'version-check-test' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: emoji-version-check-${{ inputs.app_id }}
+          path: |
+            emoji-version-test/result.json
+            emoji-preview/*.png
+            shared-config/.emoji-manager/pending/*.json
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 1
 
       - name: Migrar pack oficial em lote
         if: ${{ inputs.mode == 'bulk-telegram' }}
@@ -334,7 +405,7 @@ jobs:
           retention-days: 1
 
       - name: Salvar backup no ipa-shared-config-core
-        if: ${{ inputs.mode != 'preview' && inputs.mode != 'telegram-test' && inputs.mode != 'bulk-telegram' }}
+        if: ${{ inputs.mode != 'preview' && inputs.mode != 'telegram-test' && inputs.mode != 'bulk-telegram' && inputs.mode != 'version-check-test' }}
         working-directory: shared-config
         run: |
           set -euo pipefail
