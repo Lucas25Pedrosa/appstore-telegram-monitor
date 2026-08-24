@@ -18,6 +18,7 @@ on:
           - version-change-dry-run
           - add-app
           - delete-app
+          - visual-hash-backfill
       app_id:
         description: "App Store ID"
         required: false
@@ -109,8 +110,36 @@ jobs:
             exit 1
           fi
 
+      - name: Preencher icon_visual_hash ausentes
+        if: ${{ inputs.mode == 'visual-hash-backfill' }}
+        env:
+          SHARED_CONFIG_DIR: ${{ github.workspace }}/shared-config
+        run: |
+          set -euo pipefail
+          python core/scripts/emoji_visual_hash_backfill.py
+
+      - name: Salvar backfill visual no shared-config
+        if: ${{ success() && inputs.mode == 'visual-hash-backfill' }}
+        working-directory: shared-config
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add custom_emojis.json
+
+          if git diff --cached --quiet; then
+            echo "✅ Todos os icon_visual_hash já estavam preenchidos."
+            exit 0
+          fi
+
+          git commit -m "Backfill custom emoji visual hashes"
+          git pull --rebase origin main
+          git push origin main
+          echo "✅ icon_visual_hash ausentes preenchidos e salvos."
+
       - name: Arquivar ícones originais
-        if: ${{ inputs.mode != 'bulk-telegram' && inputs.mode != 'version-check-test' && inputs.mode != 'version-change-dry-run' && inputs.mode != 'add-app' && inputs.mode != 'delete-app' }}
+        if: ${{ inputs.mode != 'bulk-telegram' && inputs.mode != 'version-check-test' && inputs.mode != 'version-change-dry-run' && inputs.mode != 'add-app' && inputs.mode != 'delete-app' && inputs.mode != 'visual-hash-backfill' }}
         id: backup
         env:
           SHARED_CONFIG_DIR: ${{ github.workspace }}/shared-config
@@ -598,7 +627,7 @@ jobs:
           retention-days: 1
 
       - name: Salvar backup no ipa-shared-config-core
-        if: ${{ inputs.mode != 'preview' && inputs.mode != 'telegram-test' && inputs.mode != 'bulk-telegram' && inputs.mode != 'version-check-test' && inputs.mode != 'version-change-dry-run' && inputs.mode != 'add-app' && inputs.mode != 'delete-app' }}
+        if: ${{ inputs.mode != 'preview' && inputs.mode != 'telegram-test' && inputs.mode != 'bulk-telegram' && inputs.mode != 'version-check-test' && inputs.mode != 'version-change-dry-run' && inputs.mode != 'add-app' && inputs.mode != 'delete-app' && inputs.mode != 'visual-hash-backfill' }}
         working-directory: shared-config
         run: |
           set -euo pipefail
