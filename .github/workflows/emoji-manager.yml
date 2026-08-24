@@ -164,6 +164,7 @@ jobs:
             shared-config/.emoji-manager/*.json
             emoji-preview/*.png
           if-no-files-found: warn
+          include-hidden-files: true
           retention-days: 7
 
       - name: Publicar resultado do teste Telegram
