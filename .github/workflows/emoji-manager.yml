@@ -96,14 +96,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add app-icons/
+          git add app-icons/ custom_emojis.json
 
           if git diff --cached --quiet; then
-            echo "✅ Nenhum ícone novo para salvar."
+            echo "✅ Nenhum ícone ou hash novo para salvar."
             exit 0
           fi
 
-          git commit -m "Backup App Store icons"
+          git commit -m "Backup App Store icons and hashes"
           git pull --rebase origin main
           git push origin main
-          echo "✅ Backup dos ícones salvo no ipa-shared-config-core."
+          echo "✅ Backup dos ícones e hashes salvo no ipa-shared-config-core."
