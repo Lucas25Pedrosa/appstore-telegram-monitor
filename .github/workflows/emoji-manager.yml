@@ -17,6 +17,7 @@ on:
           - version-check-test
           - version-change-dry-run
           - add-app
+          - delete-app
       app_id:
         description: "App Store ID"
         required: false
@@ -26,11 +27,11 @@ on:
         required: false
         type: string
       bundle_id:
-        description: "Bundle ID (obrigatório no version-check-test e add-app)"
+        description: "Bundle ID (obrigatório no version-check-test, add-app e delete-app)"
         required: false
         type: string
       request_id:
-        description: "ID único da solicitação automática do /add"
+        description: "ID único da solicitação automática do /add ou /del"
         required: false
         type: string
       replace_existing:
@@ -91,7 +92,7 @@ jobs:
             exit 1
           fi
 
-          if [ "$MODE" = "version-check-test" ] || [ "$MODE" = "version-change-dry-run" ] || [ "$MODE" = "add-app" ]; then
+          if [ "$MODE" = "version-check-test" ] || [ "$MODE" = "version-change-dry-run" ] || [ "$MODE" = "add-app" ] || [ "$MODE" = "delete-app" ]; then
             if [ -z "$APP_NAME" ]; then
               echo "❌ app_name é obrigatório quando mode=$MODE"
               exit 1
@@ -103,13 +104,13 @@ jobs:
             fi
           fi
 
-          if [ "$MODE" = "add-app" ] && [ -z "$REQUEST_ID" ]; then
-            echo "❌ request_id é obrigatório quando mode=add-app"
+          if { [ "$MODE" = "add-app" ] || [ "$MODE" = "delete-app" ]; } && [ -z "$REQUEST_ID" ]; then
+            echo "❌ request_id é obrigatório quando mode=$MODE"
             exit 1
           fi
 
       - name: Arquivar ícones originais
-        if: ${{ inputs.mode != 'bulk-telegram' && inputs.mode != 'version-check-test' && inputs.mode != 'version-change-dry-run' && inputs.mode != 'add-app' }}
+        if: ${{ inputs.mode != 'bulk-telegram' && inputs.mode != 'version-check-test' && inputs.mode != 'version-change-dry-run' && inputs.mode != 'add-app' && inputs.mode != 'delete-app' }}
         id: backup
         env:
           SHARED_CONFIG_DIR: ${{ github.workspace }}/shared-config
@@ -294,6 +295,90 @@ jobs:
             shared-config/.emoji-manager/add-results/${{ inputs.request_id }}.json
             shared-config/.emoji-manager/pending-add/*.json
             emoji-preview/*.png
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 1
+
+      - name: Preparar remoção automática do /del
+        if: ${{ inputs.mode == 'delete-app' }}
+        env:
+          SHARED_CONFIG_DIR: ${{ github.workspace }}/shared-config
+          EMOJI_MANAGER_BOT_TOKEN: ${{ secrets.EMOJI_MANAGER_BOT_TOKEN }}
+          EMOJI_MANAGER_OWNER_ID: ${{ secrets.EMOJI_MANAGER_OWNER_ID }}
+        run: |
+          set -euo pipefail
+
+          python core/scripts/emoji_del_app.py prepare \
+            --app-name "${{ inputs.app_name }}" \
+            --bundle-id "${{ inputs.bundle_id }}" \
+            --request-id "${{ inputs.request_id }}"
+
+      - name: Persistir pending do /del antes da mutação
+        if: ${{ always() && inputs.mode == 'delete-app' }}
+        working-directory: shared-config
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add .emoji-manager/ custom_emojis.json
+
+          if git diff --cached --quiet; then
+            echo "✅ Nenhum estado novo do /del para persistir antes da mutação."
+            exit 0
+          fi
+
+          git commit -m "Prepare automatic app emoji removal"
+          git pull --rebase origin main
+          git push origin main
+
+          echo "💾 Pending da remoção automática persistido antes da mutação."
+
+      - name: Remover emoji automático do /del
+        if: ${{ success() && inputs.mode == 'delete-app' }}
+        env:
+          SHARED_CONFIG_DIR: ${{ github.workspace }}/shared-config
+          EMOJI_MANAGER_BOT_TOKEN: ${{ secrets.EMOJI_MANAGER_BOT_TOKEN }}
+          EMOJI_MANAGER_OWNER_ID: ${{ secrets.EMOJI_MANAGER_OWNER_ID }}
+        run: |
+          set -euo pipefail
+
+          python core/scripts/emoji_del_app.py apply \
+            --app-name "${{ inputs.app_name }}" \
+            --bundle-id "${{ inputs.bundle_id }}" \
+            --request-id "${{ inputs.request_id }}"
+
+      - name: Persistir resultado da remoção automática
+        if: ${{ always() && inputs.mode == 'delete-app' }}
+        working-directory: shared-config
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add custom_emojis.json .emoji-manager/
+
+          if git diff --cached --quiet; then
+            echo "✅ Nenhum resultado novo da remoção automática para salvar."
+            exit 0
+          fi
+
+          git commit -m "Complete automatic app emoji removal"
+          git pull --rebase origin main
+          git push origin main
+
+          echo "✅ Resultado da remoção automática salvo no shared-config."
+
+      - name: Publicar diagnóstico da remoção automática
+        if: ${{ always() && inputs.mode == 'delete-app' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: emoji-del-${{ inputs.request_id }}
+          path: |
+            shared-config/.emoji-manager/del-results/${{ inputs.request_id }}.json
+            shared-config/.emoji-manager/pending-del/*.json
           if-no-files-found: warn
           include-hidden-files: true
           retention-days: 1
@@ -513,7 +598,7 @@ jobs:
           retention-days: 1
 
       - name: Salvar backup no ipa-shared-config-core
-        if: ${{ inputs.mode != 'preview' && inputs.mode != 'telegram-test' && inputs.mode != 'bulk-telegram' && inputs.mode != 'version-check-test' && inputs.mode != 'version-change-dry-run' && inputs.mode != 'add-app' }}
+        if: ${{ inputs.mode != 'preview' && inputs.mode != 'telegram-test' && inputs.mode != 'bulk-telegram' && inputs.mode != 'version-check-test' && inputs.mode != 'version-change-dry-run' && inputs.mode != 'add-app' && inputs.mode != 'delete-app' }}
         working-directory: shared-config
         run: |
           set -euo pipefail
