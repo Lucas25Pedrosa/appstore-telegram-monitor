@@ -1,147 +1,402 @@
-name: Emoji Manager
+#!/usr/bin/env python3
+"""Cria/valida o primeiro custom emoji do pack oficial do Emoji Manager.
 
-on:
-  workflow_dispatch:
-    inputs:
-      mode:
-        description: "Modo de execução"
-        required: true
-        default: bootstrap
-        type: choice
-        options:
-          - bootstrap
-          - app
-          - preview
-          - telegram-test
-      app_id:
-        description: "App Store ID (obrigatório nos modos app, preview e telegram-test)"
-        required: false
-        type: string
-      app_name:
-        description: "Nome do app (opcional; usado para a pasta)"
-        required: false
-        type: string
+Etapa 5 (teste controlado):
+- usa um PNG 100x100 já processado pela máscara exata do projeto;
+- descobre o bot com getMe;
+- descobre o proprietário pelo env EMOJI_MANAGER_OWNER_ID ou pelo último /start
+  privado recebido pelo bot;
+- cria o pack oficial "Apps" como custom_emoji, needs_repainting=false;
+- no modo --replace-existing, substitui somente o único emoji de teste existente;
+- recupera e valida o novo custom_emoji_id real via getStickerSet;
+- NÃO altera custom_emojis.json.
 
-permissions:
-  contents: read
+A substituição controlada só é permitida enquanto o pack contém exatamente um
+emoji. Assim o teste do Instagram não pode atingir outros apps por engano.
+"""
 
-concurrency:
-  group: emoji-manager-shared-config
-  cancel-in-progress: false
+from __future__ import annotations
 
-jobs:
-  backup-icons:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+import argparse
+import json
+import os
+import re
+import sys
+from pathlib import Path
+from typing import Any
 
-    steps:
-      - name: Baixar Core privado
-        uses: actions/checkout@v6
-        with:
-          repository: Lucas25Pedrosa/appstore-telegram-core
-          token: ${{ secrets.APPSTORE_CORE_TOKEN }}
-          path: core
-          fetch-depth: 1
+import requests
 
-      - name: Baixar configuração compartilhada
-        uses: actions/checkout@v6
-        with:
-          repository: Lucas25Pedrosa/ipa-shared-config-core
-          token: ${{ secrets.SHARED_CONFIG_WRITE_TOKEN }}
-          path: shared-config
-          fetch-depth: 0
+TIMEOUT = 45
+API_BASE = "https://api.telegram.org"
+PACK_TITLE = "App Store Monitor — Apps"
+ALT_EMOJI = "📱"
 
-      - name: Instalar Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
 
-      - name: Instalar dependências
-        run: python -m pip install --disable-pip-version-check requests pillow
+class TelegramEmojiError(RuntimeError):
+    pass
 
-      - name: Validar entrada
-        env:
-          MODE: ${{ inputs.mode }}
-          APP_ID: ${{ inputs.app_id }}
-        run: |
-          set -euo pipefail
-          if { [ "$MODE" = "app" ] || [ "$MODE" = "preview" ] || [ "$MODE" = "telegram-test" ]; } && [ -z "$APP_ID" ]; then
-            echo "❌ app_id é obrigatório quando mode=$MODE"
-            exit 1
-          fi
 
-      - name: Arquivar ícones originais
-        id: backup
-        env:
-          SHARED_CONFIG_DIR: ${{ github.workspace }}/shared-config
-          MODE: ${{ inputs.mode }}
-          APP_ID: ${{ inputs.app_id }}
-          APP_NAME: ${{ inputs.app_name }}
-          EMOJI_PREVIEW_DIR: ${{ github.workspace }}/emoji-preview
-        run: |
-          set -euo pipefail
+def log(message: str) -> None:
+    print(message, flush=True)
 
-          if [ "$MODE" = "bootstrap" ]; then
-            python core/scripts/emoji_manager.py bootstrap
-          else
-            ARGS=("$MODE" --app-id "$APP_ID")
-            if [ -n "$APP_NAME" ]; then
-              ARGS+=(--app-name "$APP_NAME")
-            fi
-            python core/scripts/emoji_manager.py "${ARGS[@]}"
-          fi
 
-      - name: Criar primeiro custom emoji no Telegram
-        if: ${{ inputs.mode == 'telegram-test' }}
-        env:
-          EMOJI_MANAGER_BOT_TOKEN: ${{ secrets.EMOJI_MANAGER_BOT_TOKEN }}
-          EMOJI_MANAGER_OWNER_ID: ${{ secrets.EMOJI_MANAGER_OWNER_ID }}
-        run: |
-          set -euo pipefail
-          mkdir -p emoji-telegram-result
-          python core/scripts/telegram_emoji_manager.py \
-            --image "${{ steps.backup.outputs.preview_file }}" \
-            --app-id "${{ inputs.app_id }}" \
-            --app-name "${{ inputs.app_name }}" \
-            --result "emoji-telegram-result/result.json"
+def bot_api(token: str, method: str, *, data: dict[str, Any] | None = None,
+            files: dict[str, Any] | None = None, allow_error: bool = False) -> dict[str, Any]:
+    url = f"{API_BASE}/bot{token}/{method}"
+    try:
+        response = requests.post(url, data=data or {}, files=files, timeout=TIMEOUT)
+    except requests.RequestException as exc:
+        raise TelegramEmojiError(f"Falha de rede no Bot API ({method}): {exc}") from exc
 
-      - name: Publicar resultado do teste Telegram
-        if: ${{ inputs.mode == 'telegram-test' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: emoji-telegram-test-${{ inputs.app_id }}
-          path: |
-            emoji-preview/*.png
-            emoji-telegram-result/result.json
-          if-no-files-found: error
-          retention-days: 1
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise TelegramEmojiError(
+            f"Resposta não JSON do Bot API ({method}), HTTP {response.status_code}."
+        ) from exc
 
-      - name: Publicar preview 100x100
-        if: ${{ inputs.mode == 'preview' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: emoji-preview-${{ inputs.app_id }}
-          path: emoji-preview/*.png
-          if-no-files-found: error
-          retention-days: 1
+    if payload.get("ok") is True:
+        return payload
 
-      - name: Salvar backup no ipa-shared-config-core
-        if: ${{ inputs.mode != 'preview' && inputs.mode != 'telegram-test' }}
-        working-directory: shared-config
-        run: |
-          set -euo pipefail
+    if allow_error:
+        return payload
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+    description = str(payload.get("description") or f"HTTP {response.status_code}")
+    raise TelegramEmojiError(f"Telegram recusou {method}: {description}")
 
-          git add app-icons/ custom_emojis.json
 
-          if git diff --cached --quiet; then
-            echo "✅ Nenhum ícone ou hash novo para salvar."
-            exit 0
-          fi
+def get_bot_info(token: str) -> dict[str, Any]:
+    result = bot_api(token, "getMe").get("result")
+    if not isinstance(result, dict):
+        raise TelegramEmojiError("getMe não retornou dados válidos do bot.")
+    username = str(result.get("username") or "").strip()
+    if not username:
+        raise TelegramEmojiError("O bot não possui username configurado.")
+    return result
 
-          git commit -m "Backup App Store icons and hashes"
-          git pull --rebase origin main
-          git push origin main
-          echo "✅ Backup dos ícones e hashes salvo no ipa-shared-config-core."
+
+def discover_owner_id(token: str) -> int:
+    explicit = os.environ.get("EMOJI_MANAGER_OWNER_ID", "").strip()
+    if explicit:
+        try:
+            owner_id = int(explicit)
+        except ValueError as exc:
+            raise TelegramEmojiError("EMOJI_MANAGER_OWNER_ID precisa ser numérico.") from exc
+        if owner_id <= 0:
+            raise TelegramEmojiError("EMOJI_MANAGER_OWNER_ID inválido.")
+        log("👤 Proprietário obtido de EMOJI_MANAGER_OWNER_ID.")
+        return owner_id
+
+    payload = bot_api(
+        token,
+        "getUpdates",
+        data={"limit": "100", "timeout": "0", "allowed_updates": json.dumps(["message"])},
+    )
+    updates = payload.get("result")
+    if not isinstance(updates, list):
+        raise TelegramEmojiError("getUpdates não retornou uma lista válida.")
+
+    for update in reversed(updates):
+        if not isinstance(update, dict):
+            continue
+        message = update.get("message")
+        if not isinstance(message, dict):
+            continue
+        chat = message.get("chat")
+        sender = message.get("from")
+        text = str(message.get("text") or "").strip()
+        if not isinstance(chat, dict) or not isinstance(sender, dict):
+            continue
+        if chat.get("type") != "private":
+            continue
+        if not text.startswith("/start"):
+            continue
+        try:
+            owner_id = int(sender.get("id"))
+        except (TypeError, ValueError):
+            continue
+        if owner_id > 0:
+            log("👤 Proprietário descoberto pelo último /start privado.")
+            return owner_id
+
+    raise TelegramEmojiError(
+        "Nenhum /start privado encontrado. Abra o bot no Telegram, envie /start e rode novamente."
+    )
+
+
+def pack_name_for(username: str) -> str:
+    clean = re.sub(r"[^A-Za-z0-9_]", "", username)
+    if not clean:
+        raise TelegramEmojiError("Username do bot não pode formar nome de pack válido.")
+    suffix = f"_by_{clean}"
+    prefix = "apps"
+    name = f"{prefix}{suffix}"
+    if len(name) > 64:
+        prefix = prefix[: max(1, 64 - len(suffix))]
+        name = f"{prefix}{suffix}"
+    if len(name) > 64 or not name[0].isalpha():
+        raise TelegramEmojiError("Não foi possível formar nome de pack válido.")
+    return name
+
+
+def get_pack_optional(token: str, name: str) -> dict[str, Any] | None:
+    payload = bot_api(token, "getStickerSet", data={"name": name}, allow_error=True)
+    if payload.get("ok") is True:
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            raise TelegramEmojiError("getStickerSet retornou pack inválido.")
+        return result
+
+    description = str(payload.get("description") or "").lower()
+    if "sticker set name is invalid" in description or "stickerset_invalid" in description:
+        return None
+    # Algumas versões do Bot API respondem genericamente quando o set não existe.
+    if "sticker set" in description and ("not found" in description or "invalid" in description):
+        return None
+    raise TelegramEmojiError(
+        f"Telegram recusou getStickerSet: {payload.get('description') or 'erro desconhecido'}"
+    )
+
+
+def create_pack(token: str, owner_id: int, name: str, image: Path) -> None:
+    input_sticker = {
+        "sticker": "attach://emoji_file",
+        "format": "static",
+        "emoji_list": [ALT_EMOJI],
+        "keywords": ["app"],
+    }
+    data = {
+        "user_id": str(owner_id),
+        "name": name,
+        "title": PACK_TITLE,
+        "stickers": json.dumps([input_sticker], ensure_ascii=False),
+        "sticker_type": "custom_emoji",
+        "needs_repainting": "false",
+    }
+    with image.open("rb") as handle:
+        bot_api(
+            token,
+            "createNewStickerSet",
+            data=data,
+            files={"emoji_file": (image.name, handle, "image/png")},
+        )
+    log(f"✅ Pack oficial criado: {name}")
+
+
+def replace_single_pack_emoji(
+    token: str,
+    owner_id: int,
+    name: str,
+    old_sticker_file_id: str,
+    image: Path,
+) -> None:
+    if not old_sticker_file_id:
+        raise TelegramEmojiError("Sticker atual não possui file_id para substituição.")
+
+    input_sticker = {
+        "sticker": "attach://emoji_file",
+        "format": "static",
+        "emoji_list": [ALT_EMOJI],
+        "keywords": ["app"],
+    }
+    data = {
+        "user_id": str(owner_id),
+        "name": name,
+        "old_sticker": old_sticker_file_id,
+        "sticker": json.dumps(input_sticker, ensure_ascii=False),
+    }
+    with image.open("rb") as handle:
+        bot_api(
+            token,
+            "replaceStickerInSet",
+            data=data,
+            files={"emoji_file": (image.name, handle, "image/png")},
+        )
+    log("♻️ Emoji de teste substituído no pack oficial.")
+
+
+def validate_single_custom_emoji(pack: dict[str, Any]) -> dict[str, Any]:
+    sticker_type = str(pack.get("sticker_type") or "")
+    if sticker_type != "custom_emoji":
+        raise TelegramEmojiError(
+            f"O set existente não é custom_emoji (tipo recebido: {sticker_type!r})."
+        )
+
+    stickers = pack.get("stickers")
+    if not isinstance(stickers, list) or not stickers:
+        raise TelegramEmojiError("Pack não contém custom emojis.")
+    if len(stickers) > 1:
+        raise TelegramEmojiError(
+            "O pack oficial já possui mais de um emoji; o teste da Etapa 5 não fará alterações."
+        )
+
+    sticker = stickers[0]
+    if not isinstance(sticker, dict):
+        raise TelegramEmojiError("Sticker retornado pelo Telegram é inválido.")
+    if str(sticker.get("type") or "") != "custom_emoji":
+        raise TelegramEmojiError("O primeiro item do pack não é custom_emoji.")
+
+    custom_emoji_id = str(sticker.get("custom_emoji_id") or "").strip()
+    if not custom_emoji_id.isdigit():
+        raise TelegramEmojiError("Telegram não retornou custom_emoji_id válido.")
+
+    if bool(sticker.get("needs_repainting")):
+        raise TelegramEmojiError("Emoji retornou needs_repainting=true; cores não seriam preservadas.")
+
+    return sticker
+
+
+def write_result(
+    path: Path,
+    *,
+    username: str,
+    pack_name: str,
+    custom_emoji_id: str,
+    created: bool,
+    replaced: bool,
+    old_custom_emoji_id: str | None,
+    app_id: str,
+    app_name: str,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "ok": True,
+        "stage": 5,
+        "bot_username": username,
+        "pack_name": pack_name,
+        "pack_title": PACK_TITLE,
+        "pack_created": created,
+        "emoji_replaced": replaced,
+        "old_custom_emoji_id": old_custom_emoji_id,
+        "app_store_id": app_id,
+        "app_name": app_name,
+        "fallback": ALT_EMOJI,
+        "needs_repainting": False,
+        "custom_emoji_id": custom_emoji_id,
+        "custom_emojis_json_changed": False,
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--image", required=True, type=Path)
+    parser.add_argument("--app-id", required=True)
+    parser.add_argument("--app-name", default="")
+    parser.add_argument("--result", required=True, type=Path)
+    parser.add_argument(
+        "--replace-existing",
+        action="store_true",
+        help=(
+            "Substitui o único emoji existente do pack. "
+            "Uso exclusivo do teste controlado do Instagram."
+        ),
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        token = os.environ.get("EMOJI_MANAGER_BOT_TOKEN", "").strip()
+        if not token:
+            raise TelegramEmojiError("EMOJI_MANAGER_BOT_TOKEN não foi configurado.")
+        if not args.image.is_file():
+            raise TelegramEmojiError(f"PNG 100x100 não encontrado: {args.image}")
+
+        # A validação estrita de dimensão/formato fica antes de qualquer chamada destrutiva.
+        from PIL import Image
+        with Image.open(args.image) as image:
+            if image.format != "PNG" or image.size != (100, 100):
+                raise TelegramEmojiError(
+                    f"Arquivo precisa ser PNG 100x100; recebido {image.format} {image.size}."
+                )
+
+        bot = get_bot_info(token)
+        username = str(bot["username"])
+        owner_id = discover_owner_id(token)
+        pack_name = pack_name_for(username)
+
+        log(f"🤖 Bot: @{username}")
+        log(f"📦 Pack oficial: {pack_name}")
+
+        pack = get_pack_optional(token, pack_name)
+        created = False
+        replaced = False
+        old_custom_emoji_id: str | None = None
+
+        if pack is None:
+            if args.replace_existing:
+                raise TelegramEmojiError(
+                    "--replace-existing foi solicitado, mas o pack oficial não existe."
+                )
+            create_pack(token, owner_id, pack_name, args.image)
+            created = True
+            pack = get_pack_optional(token, pack_name)
+            if pack is None:
+                raise TelegramEmojiError(
+                    "Pack foi criado, mas getStickerSet não conseguiu recuperá-lo."
+                )
+        elif args.replace_existing:
+            old_sticker = validate_single_custom_emoji(pack)
+            old_custom_emoji_id = str(old_sticker["custom_emoji_id"])
+            old_file_id = str(old_sticker.get("file_id") or "").strip()
+            log(f"🆔 ID anterior do teste: {old_custom_emoji_id}")
+            replace_single_pack_emoji(
+                token,
+                owner_id,
+                pack_name,
+                old_file_id,
+                args.image,
+            )
+            replaced = True
+            pack = get_pack_optional(token, pack_name)
+            if pack is None:
+                raise TelegramEmojiError(
+                    "Pack não pôde ser recuperado após a substituição."
+                )
+        else:
+            log(
+                "ℹ️ Pack oficial já existe; nenhuma imagem será adicionada "
+                "nesta execução de teste."
+            )
+
+        sticker = validate_single_custom_emoji(pack)
+        custom_emoji_id = str(sticker["custom_emoji_id"])
+
+        # Confirma o ID também pela API específica de custom emojis.
+        check = bot_api(
+            token,
+            "getCustomEmojiStickers",
+            data={"custom_emoji_ids": json.dumps([custom_emoji_id])},
+        ).get("result")
+        if not isinstance(check, list) or len(check) != 1:
+            raise TelegramEmojiError("getCustomEmojiStickers não validou o ID criado.")
+        if str(check[0].get("custom_emoji_id") or "") != custom_emoji_id:
+            raise TelegramEmojiError("ID retornado pela validação não coincide com o pack.")
+
+        write_result(
+            args.result,
+            username=username,
+            pack_name=pack_name,
+            custom_emoji_id=custom_emoji_id,
+            created=created,
+            replaced=replaced,
+            old_custom_emoji_id=old_custom_emoji_id,
+            app_id=str(args.app_id),
+            app_name=str(args.app_name or ""),
+        )
+
+        log(f"🆔 custom_emoji_id validado: {custom_emoji_id}")
+        if replaced:
+            log("✅ Novo ID validado após substituir o emoji de teste.")
+        log("🛡️ custom_emojis.json não foi alterado nesta etapa.")
+        return 0
+    except (TelegramEmojiError, OSError, requests.RequestException) as exc:
+        log(f"❌ Emoji Manager Telegram: {exc}")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
